@@ -14,6 +14,34 @@
 #include "pax_text.h"
 #include "portmacro.h"
 
+#include "freertos/FreeRTOS.h"
+// #include "freeRTOS\task.h"
+
+#include "bsp/audio.h"
+#include "driver/i2s_std.h"
+
+#define PLAYBACK_BUFFER_SIZE_BYTES  (2048)
+#define PLAYBACK_SAMPLE_RATE        (44100)
+#define PLAYBACK_BITS_PER_SAMPLE    (I2S_DATA_BIT_WIDTH_16BIT)
+#define SINE_WAVE_FREQUENCY         (440) // A4 note
+#define AMPLITUDE                   (INT16_MAX / 4) // Reduce amplitude to avoid clipping
+#define TAG_PLAYBACK                "PLAYBACK"
+
+void run_leds(void *parameter);
+
+/*
+Stuff from Nicolai:
+
+rtc_retain_mem_t* mem = bootloader_common_get_rtc_retain_mem();
+Write 8 zeros to that, then do esp_reset();
+
+Renze — 21.16
+ESP32 can do a lot of amazing things people don't know about
+LP RAM (and the LP CPU core) are one such example, even works when the rest of the soc is put in sleep
+
+
+*/
+
 // Constants
 static char const TAG[] = "main";
 
@@ -25,12 +53,91 @@ static lcd_rgb_data_endian_t        display_data_endian  = LCD_RGB_DATA_ENDIAN_L
 static pax_buf_t                    fb                   = {0};
 static QueueHandle_t                input_event_queue    = NULL;
 
+uint8_t running = 1;
+
+//Audio stuff
+i2s_chan_handle_t i2s_handle = NULL;
+
+//GRB
+uint8_t led_data[] = {
+    0xfb, 0x5b, 0xcf, 0xab, 0xf5, 0xb9, 0xff, 0xff, 0xff, 0xab, 0xf5, 0xb9,  0xfb, 0x5b, 0xcf, 0x00, 0x00, 0x00,
+};
+
 #if defined(CONFIG_BSP_TARGET_KAMI)
 static pax_col_t palette[] = {0xffffffff, 0xff000000, 0xffff0000};  // white, black, red
 #endif
 
 void blit(void) {
     bsp_display_blit(0, 0, display_h_res, display_v_res, pax_buf_get_pixels(&fb));
+}
+
+void clear_screen() {
+    pax_simple_rect(&fb, 0xFFFFFFFF, 0, 0, pax_buf_get_width(&fb), pax_buf_get_height(&fb));
+}
+
+void run_leds(void *parameter) {
+    while(1) {
+        bsp_led_write(led_data, sizeof(led_data));
+        int i = 0;
+        int j;
+        uint8_t temp;
+        for (j = 0; j < 3; j++) {
+            temp = led_data[0];
+            for (i = 0; i < 17; i++) {
+                led_data[i] = led_data[i+1];
+            }
+            led_data[17] = temp;
+        }
+        // for (int j = 0; j < 3; j++) {
+        //     led_data[i] = temp;
+        // }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+void playback_sine_wave_task(void *arg) {
+    uint8_t *tx_buffer = (uint8_t *)malloc(PLAYBACK_BUFFER_SIZE_BYTES);
+    if (!tx_buffer) {
+        ESP_LOGE(TAG_PLAYBACK, "Failed to allocate TX buffer");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG_PLAYBACK, "Starting sine wave playback...");
+    size_t bytes_written = 0;
+    double time_step = 1.0 / PLAYBACK_SAMPLE_RATE;
+    double current_time = 0;
+    int16_t *samples16 = (int16_t *)tx_buffer;
+
+    // int counter = 0;
+
+    while (1) {
+        int num_frames = PLAYBACK_BUFFER_SIZE_BYTES / ( (PLAYBACK_BITS_PER_SAMPLE / 8) * 2); // 2 channels for stereo
+
+        for (int i = 0; i < num_frames; i++) {
+            int16_t sample_val = (int16_t)(AMPLITUDE * sin(2 * M_PI * SINE_WAVE_FREQUENCY * current_time));
+            samples16[i * 2 + 0] = sample_val; // Left channel
+            samples16[i * 2 + 1] = sample_val; // Right channel (mono sound on stereo)
+            current_time += time_step;
+        }
+
+        esp_err_t ret = i2s_channel_write(i2s_handle, tx_buffer, PLAYBACK_BUFFER_SIZE_BYTES, &bytes_written, portMAX_DELAY);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG_PLAYBACK, "I2S write error: %s", esp_err_to_name(ret));
+        } else if (bytes_written < PLAYBACK_BUFFER_SIZE_BYTES) {
+            ESP_LOGW(TAG_PLAYBACK, "I2S write underrun: wrote %d of %d bytes", bytes_written, PLAYBACK_BUFFER_SIZE_BYTES);
+        }
+        // if (counter == 1000 && 0) {
+        //     free(tx_buffer);
+        //     vTaskDelete(NULL);
+        //     return;
+        // }
+        // counter++;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    // free(tx_buffer); // Unreachable
+    // vTaskDelete(NULL);
 }
 
 void app_main(void) {
@@ -48,12 +155,27 @@ void app_main(void) {
     // Initialize the Board Support Package
     ESP_ERROR_CHECK(bsp_device_initialize());
     bsp_led_initialize();
+    //0x47, 0x00, 0xDF, 0x97, 0x5A, 0xEE, 0xD1, 0x4C, 0xE5, 0xCA, 0x68, 0x65, 0x89, 0xEA, 0x14, 0x25, 0xB8, 0x73,
+    //GRB
+    //LED0: Power
+    //LED1: Antenna
+    //LED2: Message
+    //LED3: Power
+    //LED4: A
+    //LED5: B
+    // uint8_t led_data[] = {
+    //     0x47, 0x00, 0xDF, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF,
+    // };
+    // bsp_led_write(led_data, sizeof(led_data));
 
-    uint8_t led_data[] = {
-        0x47, 0x00, 0xDF, 0x97, 0x5A, 0xEE, 0xD1, 0x4C, 0xE5, 0xCA, 0x68, 0x65, 0x89, 0xEA, 0x14, 0x25, 0xB8, 0x73,
-    };
-    bsp_led_write(led_data, sizeof(led_data));
-
+    xTaskCreate(run_leds, "running leds", 2048, NULL, 2, NULL);
+    
+    bsp_audio_initialize(PLAYBACK_SAMPLE_RATE);
+    bsp_audio_set_volume(60);  //%
+    bsp_audio_set_amplifier(true); //Enable speaker
+    bsp_audio_get_i2s_handle(&i2s_handle);
+    xTaskCreate(playback_sine_wave_task, "sine_playback", 4096, NULL, 5, NULL);
+    
     // Get display parameters and rotation
     res = bsp_display_get_parameters(&display_h_res, &display_v_res, &display_color_format, &display_data_endian);
     ESP_ERROR_CHECK(res);  // Check that the display parameters have been initialized
@@ -121,12 +243,26 @@ void app_main(void) {
     ESP_LOGW(TAG, "Hello world!");
 
     pax_background(&fb, WHITE);
-    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Hello world!");
+    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Hej verden!");
+
+    float midpoint_x = pax_buf_get_width(&fb) / 2.0;  // Middle of the screen horizontally.
+    float midpoint_y = pax_buf_get_height(&fb) / 2.0; // Middle of the screen vertically.
+    float radius     = 50;                             // Nice, big circle.
+    pax_simple_circle(&fb, pax_col_rgb(255, 0, 0), midpoint_x, midpoint_y, radius);
+
     blit();
 
-    while (1) {
+    
+
+    
+
+    while (running == 1) {
+        //clear_screen();
         bsp_input_event_t event;
         if (xQueueReceive(input_event_queue, &event, portMAX_DELAY) == pdTRUE) {
+            //pax_draw_text(&fb, 0xFF000000, pax_font_sky_mono, 32, 0, 0, "Hest2!");
+
+
             switch (event.type) {
                 case INPUT_EVENT_TYPE_KEYBOARD: {
                     if (event.args_keyboard.ascii != '\b' ||
@@ -156,6 +292,36 @@ void app_main(void) {
                     }
                     if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F2) {
                         bsp_input_set_backlight_brightness(100);
+                    }
+
+                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_ESC) {
+                        bsp_device_restart_to_launcher();
+                    }
+                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_LEFT && event.args_navigation.state) {
+                        //pax_simple_rect(&fb, WHITE, midpoint_x-25, midpoint_y-25, midpoint_x+25, midpoint_y+25);
+                        pax_simple_circle(&fb, WHITE, midpoint_x, midpoint_y, radius);
+                        midpoint_x -= 10;
+                        pax_simple_circle(&fb, pax_col_rgb(255, 0, 0), midpoint_x, midpoint_y, radius);
+                    }
+
+                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_DOWN && event.args_navigation.state) {
+                        //pax_simple_rect(&fb, WHITE, midpoint_x-25, midpoint_y-25, midpoint_x+25, midpoint_y+25);
+                        pax_simple_circle(&fb, WHITE, midpoint_x, midpoint_y, radius);
+                        midpoint_y += 10;
+                        pax_simple_circle(&fb, pax_col_rgb(255, 0, 0), midpoint_x, midpoint_y, radius);
+                    }
+                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_RIGHT && event.args_navigation.state) {
+                        //pax_simple_rect(&fb, WHITE, midpoint_x-25, midpoint_y-25, midpoint_x+25, midpoint_y+25);
+                        pax_simple_circle(&fb, WHITE, midpoint_x, midpoint_y, radius);
+                        midpoint_x += 10;
+                        pax_simple_circle(&fb, pax_col_rgb(255, 0, 0), midpoint_x, midpoint_y, radius);
+                    }
+
+                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_UP && event.args_navigation.state) {
+                        //pax_simple_rect(&fb, WHITE, midpoint_x-25, midpoint_y-25, midpoint_x+25, midpoint_y+25);
+                        pax_simple_circle(&fb, WHITE, midpoint_x, midpoint_y, radius);
+                        midpoint_y -= 10;
+                        pax_simple_circle(&fb, pax_col_rgb(255, 0, 0), midpoint_x, midpoint_y, radius);
                     }
 
                     pax_simple_rect(&fb, WHITE, 0, 100, pax_buf_get_width(&fb), 72);

@@ -21,26 +21,13 @@
 #include "driver/i2s_std.h"
 
 #define PLAYBACK_BUFFER_SIZE_BYTES  (2048)
-#define PLAYBACK_SAMPLE_RATE        (44100)
+#define PLAYBACK_SAMPLE_RATE        (44100) //In Hz
 #define PLAYBACK_BITS_PER_SAMPLE    (I2S_DATA_BIT_WIDTH_16BIT)
 #define SINE_WAVE_FREQUENCY         (440) // A4 note
-#define AMPLITUDE                   (INT16_MAX / 4) // Reduce amplitude to avoid clipping
+#define AMPLITUDE                   (INT16_MAX / 2) // Reduce amplitude to avoid clipping
 #define TAG_PLAYBACK                "PLAYBACK"
 
 void run_leds(void *parameter);
-
-/*
-Stuff from Nicolai:
-
-rtc_retain_mem_t* mem = bootloader_common_get_rtc_retain_mem();
-Write 8 zeros to that, then do esp_reset();
-
-Renze — 21.16
-ESP32 can do a lot of amazing things people don't know about
-LP RAM (and the LP CPU core) are one such example, even works when the rest of the soc is put in sleep
-
-
-*/
 
 // Constants
 static char const TAG[] = "main";
@@ -52,10 +39,6 @@ static lcd_color_rgb_pixel_format_t display_color_format = LCD_COLOR_PIXEL_FORMA
 static lcd_rgb_data_endian_t        display_data_endian  = LCD_RGB_DATA_ENDIAN_LITTLE;
 static pax_buf_t                    fb                   = {0};
 static QueueHandle_t                input_event_queue    = NULL;
-
-uint8_t running = 1;
-
-
 
 //GRB
 uint8_t led_data[] = {
@@ -94,61 +77,56 @@ void run_leds(void *parameter) {
     }
 }
 
+//This function is based on: https://circuitlabs.net/i2s-audio-codec-integration-with-esp-idf/
 void playback_sine_wave_task(void *arg) {
-    //Audio stuff
     i2s_chan_handle_t my_i2s_handle = NULL;
-    bsp_audio_initialize((uint32_t)PLAYBACK_SAMPLE_RATE);
-    bsp_audio_set_volume(60);  //%
+    bsp_audio_initialize((uint32_t)PLAYBACK_SAMPLE_RATE); //Initalize the handle using the wanted sample rate
+    bsp_audio_set_volume(60);  //Setting the volume in percentage%
     bsp_audio_set_amplifier(true); //Enable speaker
-    bsp_audio_get_i2s_handle(&my_i2s_handle);
+    bsp_audio_get_i2s_handle(&my_i2s_handle); //Get the prepared handle
 
     if (my_i2s_handle == NULL) {
         ESP_LOGE(TAG_PLAYBACK, "Handle is null. Quitting....");
-        return;
+        return; //The application (more specific, this task) will crash if the handle is null and there is returned
     }
 
     uint8_t *tx_buffer = (uint8_t *)malloc(PLAYBACK_BUFFER_SIZE_BYTES);
     if (!tx_buffer) {
         ESP_LOGE(TAG_PLAYBACK, "Failed to allocate TX buffer");
         vTaskDelete(NULL);
-        return;
+        return; //The application (more specific, this task) will crash if not possible to allocate memeory and there is returned
     }
 
     ESP_LOGI(TAG_PLAYBACK, "Starting sine wave playback...");
     size_t bytes_written = 0;
-    double time_step = 1.0 / PLAYBACK_SAMPLE_RATE;
+    double time_step = 1.0 / PLAYBACK_SAMPLE_RATE; //t=1/f
     double current_time = 0;
     int16_t *samples16 = (int16_t *)tx_buffer;
-
-    // int counter = 0;
 
     while (1) {
         int num_frames = PLAYBACK_BUFFER_SIZE_BYTES / ( (PLAYBACK_BITS_PER_SAMPLE / 8) * 2); // 2 channels for stereo
 
         for (int i = 0; i < num_frames; i++) {
+            //Get the current value based on where on the sine curve we are to the given time
             int16_t sample_val = (int16_t)(AMPLITUDE * sin(2 * M_PI * SINE_WAVE_FREQUENCY * current_time));
             samples16[i * 2 + 0] = sample_val; // Left channel
             samples16[i * 2 + 1] = sample_val; // Right channel (mono sound on stereo)
             current_time += time_step;
         }
 
+        //Write data (the frames made in the for loop) to the channel. See 
+        //https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/i2s.html#_CPPv417i2s_channel_write17i2s_chan_handle_tPKv6size_tP6size_t8uint32_t 
+        //for more
         esp_err_t ret = i2s_channel_write(my_i2s_handle, tx_buffer, PLAYBACK_BUFFER_SIZE_BYTES, &bytes_written, portMAX_DELAY);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG_PLAYBACK, "I2S write error: %s", esp_err_to_name(ret));
         } else if (bytes_written < PLAYBACK_BUFFER_SIZE_BYTES) {
             ESP_LOGW(TAG_PLAYBACK, "I2S write underrun: wrote %d of %d bytes", bytes_written, PLAYBACK_BUFFER_SIZE_BYTES);
         }
-        // if (counter == 1000 && 0) {
-        //     free(tx_buffer);
-        //     vTaskDelete(NULL);
-        //     return;
-        // }
-        // counter++;
         // vTaskDelay(pdMS_TO_TICKS(10)); //Just sleep to get the rest of the UI to function Not needed if everything works
     }
-
-    // free(tx_buffer); // Unreachable
-    // vTaskDelete(NULL);
+    // free(tx_buffer); // Unreachable but you need to clean up your memory if you stop the playback
+    // vTaskDelete(NULL); //Delete the task to clean up after ourself
 }
 
 void app_main(void) {
@@ -179,7 +157,7 @@ void app_main(void) {
     // };
     // bsp_led_write(led_data, sizeof(led_data));
 
-    // xTaskCreate(run_leds, "running leds", 2048, NULL, 2, NULL);
+    xTaskCreate(run_leds, "running leds", 2048, NULL, 2, NULL);
     
     xTaskCreate(playback_sine_wave_task, "sine_playback", 4096, NULL, 5, NULL);
     
@@ -263,7 +241,7 @@ void app_main(void) {
 
     
 
-    while (running == 1) {
+    while (1) {
         //clear_screen();
         bsp_input_event_t event;
         if (xQueueReceive(input_event_queue, &event, portMAX_DELAY) == pdTRUE) {

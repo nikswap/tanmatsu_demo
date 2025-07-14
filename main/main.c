@@ -55,8 +55,7 @@ static QueueHandle_t                input_event_queue    = NULL;
 
 uint8_t running = 1;
 
-//Audio stuff
-i2s_chan_handle_t i2s_handle = NULL;
+
 
 //GRB
 uint8_t led_data[] = {
@@ -96,6 +95,18 @@ void run_leds(void *parameter) {
 }
 
 void playback_sine_wave_task(void *arg) {
+    //Audio stuff
+    i2s_chan_handle_t my_i2s_handle = NULL;
+    bsp_audio_initialize((uint32_t)PLAYBACK_SAMPLE_RATE);
+    bsp_audio_set_volume(60);  //%
+    bsp_audio_set_amplifier(true); //Enable speaker
+    bsp_audio_get_i2s_handle(&my_i2s_handle);
+
+    if (my_i2s_handle == NULL) {
+        ESP_LOGE(TAG_PLAYBACK, "Handle is null. Quitting....");
+        return;
+    }
+
     uint8_t *tx_buffer = (uint8_t *)malloc(PLAYBACK_BUFFER_SIZE_BYTES);
     if (!tx_buffer) {
         ESP_LOGE(TAG_PLAYBACK, "Failed to allocate TX buffer");
@@ -121,7 +132,7 @@ void playback_sine_wave_task(void *arg) {
             current_time += time_step;
         }
 
-        esp_err_t ret = i2s_channel_write(i2s_handle, tx_buffer, PLAYBACK_BUFFER_SIZE_BYTES, &bytes_written, portMAX_DELAY);
+        esp_err_t ret = i2s_channel_write(my_i2s_handle, tx_buffer, PLAYBACK_BUFFER_SIZE_BYTES, &bytes_written, portMAX_DELAY);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG_PLAYBACK, "I2S write error: %s", esp_err_to_name(ret));
         } else if (bytes_written < PLAYBACK_BUFFER_SIZE_BYTES) {
@@ -133,7 +144,7 @@ void playback_sine_wave_task(void *arg) {
         //     return;
         // }
         // counter++;
-        vTaskDelay(pdMS_TO_TICKS(10));
+        // vTaskDelay(pdMS_TO_TICKS(10)); //Just sleep to get the rest of the UI to function Not needed if everything works
     }
 
     // free(tx_buffer); // Unreachable
@@ -168,12 +179,8 @@ void app_main(void) {
     // };
     // bsp_led_write(led_data, sizeof(led_data));
 
-    xTaskCreate(run_leds, "running leds", 2048, NULL, 2, NULL);
+    // xTaskCreate(run_leds, "running leds", 2048, NULL, 2, NULL);
     
-    bsp_audio_initialize(PLAYBACK_SAMPLE_RATE);
-    bsp_audio_set_volume(60);  //%
-    bsp_audio_set_amplifier(true); //Enable speaker
-    bsp_audio_get_i2s_handle(&i2s_handle);
     xTaskCreate(playback_sine_wave_task, "sine_playback", 4096, NULL, 5, NULL);
     
     // Get display parameters and rotation

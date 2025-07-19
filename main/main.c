@@ -538,13 +538,22 @@ void app_main(void) {
 
     init_holes(pax_buf_get_width(&fb), pax_buf_get_height(&fb));
     get_food_pos(pax_buf_get_width(&fb), pax_buf_get_height(&fb));
-
-    while (1) {
+    uint8_t game_running = 1;
+    uint32_t old_score = score;
+    while (game_running) {
         //clear_screen();
         bsp_input_event_t event;
         pax_simple_circle(&fb, WHITE, midpoint_x, midpoint_y, radius);
 
         pax_simple_tri(&fb, GREEN, food_x, food_y-10, food_x-10, food_y+10, food_x+10, food_y+10);
+
+        if (score != old_score) {
+            sprintf(score_text, "Score: %d", ((int)score));
+            pax_simple_rect(&fb, WHITE, 0,0,100,15);
+            pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, score_text);
+            old_score = score;
+        }
+
         for (int j = 0; j < HOLES*2; j+=2) {
             pax_simple_rect(&fb, BLUE, holes_pos[j]-10,holes_pos[j+1]-10,20,20);
         }
@@ -579,6 +588,27 @@ void app_main(void) {
         if (data.accel_x<-1) {
             midpoint_y+=10;
         }
+
+        //Check for food
+        if (midpoint_x > food_x-10 && midpoint_x <food_x+10
+                && midpoint_y > food_y-10 && midpoint_y <food_y+10) {
+            pax_simple_tri(&fb, WHITE, food_x, food_y-10, food_x-10, food_y+10, food_x+10, food_y+10);
+            get_food_pos(pax_buf_get_width(&fb), pax_buf_get_height(&fb));
+            score++;
+        }
+
+        //Check for holes
+        uint8_t should_break= 0;
+        for (int j = 0; j < HOLES*2; j+=2) {
+            if (midpoint_x > holes_pos[j]-10 && midpoint_x <holes_pos[j]+10
+                && midpoint_y > holes_pos[j+1]-10 && midpoint_y <holes_pos[j+1]+10) {
+                    should_break = 1;
+                    break;
+            }
+        }
+        if (should_break)
+            break;
+
         pax_simple_circle(&fb, pax_col_rgb(255, 0, 0), midpoint_x, midpoint_y, radius);
         blit();
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -686,4 +716,5 @@ void app_main(void) {
         }
         /**/
     }
+    bsp_device_restart_to_launcher();
 }

@@ -19,6 +19,7 @@
 #include "bsp/i2c.h"
 
 #include "freertos/FreeRTOS.h"
+#include "esp_random.h"
 // #include "freeRTOS\task.h"
 
 #include "bsp/audio.h"
@@ -61,6 +62,14 @@ struct imu_data {
     float gyro_z;
 };
 
+//Game stuff
+#define HOLES 10
+uint32_t holes_pos[HOLES*2];
+uint32_t food_x=999999;
+uint32_t food_y=999999;
+uint32_t score = 0;
+// srand(time(NULL));
+
 //GRB
 uint8_t led_data[] = {
     0xfb, 0x5b, 0xcf, 0xab, 0xf5, 0xb9, 0xff, 0xff, 0xff, 0xab, 0xf5, 0xb9,  0xfb, 0x5b, 0xcf, 0x00, 0x00, 0x00,
@@ -69,6 +78,19 @@ uint8_t led_data[] = {
 #if defined(CONFIG_BSP_TARGET_KAMI)
 static pax_col_t palette[] = {0xffffffff, 0xff000000, 0xffff0000};  // white, black, red
 #endif
+
+void init_holes(uint32_t max_x, uint32_t max_y) {
+    int i;
+    for (i = 0; i < HOLES*2; i+=2) {
+        holes_pos[i] = esp_random()%max_x;
+        holes_pos[i+1] = esp_random()%max_y;
+    }
+}
+
+void get_food_pos(uint32_t max_x, uint32_t max_y) {
+    food_x = esp_random() % max_x;
+    food_y = esp_random()%max_y;
+}
 
 static int8_t set_gyro_config(struct bmi2_dev* dev) {
     int8_t                  rslt;
@@ -426,7 +448,7 @@ void app_main(void) {
 
     xTaskCreate(run_leds, "running leds", 2048, NULL, 2, NULL);
     
-    xTaskCreate(playback_sine_wave_task, "sine_playback", 4096, NULL, 5, NULL);
+    // xTaskCreate(playback_sine_wave_task, "sine_playback", 4096, NULL, 5, NULL);
 
     struct bmi2_dev bmi = init_bmi();
 
@@ -489,6 +511,8 @@ void app_main(void) {
 #define BLACK 0xFF000000
 #define WHITE 0xFFFFFFFF
 #define RED   0xFFFF0000
+#define GREEN 0xFF00FF00
+#define BLUE 0xFF0000FF
 #endif
 
     pax_buf_set_orientation(&fb, orientation);
@@ -499,21 +523,32 @@ void app_main(void) {
     ESP_LOGW(TAG, "Hello world!");
 
     pax_background(&fb, WHITE);
-    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Hej verden!");
+    char score_text[20];
+    sprintf(score_text, "Score: %d", ((int)score));
+    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, score_text);
 
     float midpoint_x = pax_buf_get_width(&fb) / 2.0;  // Middle of the screen horizontally.
     float midpoint_y = pax_buf_get_height(&fb) / 2.0; // Middle of the screen vertically.
-    float radius     = 25;                             // Nice, big circle.
+    float radius     = 5;                             // Nice, big circle.
     pax_simple_circle(&fb, pax_col_rgb(255, 0, 0), midpoint_x, midpoint_y, radius);
 
     blit();
 
     struct imu_data data;
 
+    init_holes(pax_buf_get_width(&fb), pax_buf_get_height(&fb));
+    get_food_pos(pax_buf_get_width(&fb), pax_buf_get_height(&fb));
+
     while (1) {
         //clear_screen();
         bsp_input_event_t event;
         pax_simple_circle(&fb, WHITE, midpoint_x, midpoint_y, radius);
+
+        pax_simple_tri(&fb, GREEN, food_x, food_y-10, food_x-10, food_y+10, food_x+10, food_y+10);
+        for (int j = 0; j < HOLES*2; j+=2) {
+            pax_simple_rect(&fb, BLUE, holes_pos[j]-10,holes_pos[j+1]-10,20,20);
+        }
+
         if (midpoint_x+radius > pax_buf_get_width(&fb)) {
             midpoint_x = pax_buf_get_width(&fb)-radius;
         }

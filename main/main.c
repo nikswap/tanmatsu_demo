@@ -49,6 +49,18 @@ static lcd_rgb_data_endian_t        display_data_endian  = LCD_RGB_DATA_ENDIAN_L
 static pax_buf_t                    fb                   = {0};
 static QueueHandle_t                input_event_queue    = NULL;
 
+//Accelerometer stuff
+float g_gyro_x = 0.0f;
+float g_gyro_y = 0.0f;
+struct imu_data {
+    float accel_x;
+    float accel_y;
+    float accel_z;
+    float gyro_x;
+    float gyro_y;
+    float gyro_z;
+};
+
 //GRB
 uint8_t led_data[] = {
     0xfb, 0x5b, 0xcf, 0xab, 0xf5, 0xb9, 0xff, 0xff, 0xff, 0xab, 0xf5, 0xb9,  0xfb, 0x5b, 0xcf, 0x00, 0x00, 0x00,
@@ -122,6 +134,100 @@ void clear_screen() {
     pax_simple_rect(&fb, 0xFFFFFFFF, 0, 0, pax_buf_get_width(&fb), pax_buf_get_height(&fb));
 }
 
+struct bmi2_dev init_bmi() {
+    i2c_master_bus_handle_t handle;
+    SemaphoreHandle_t       semaphore;
+    bsp_i2c_primary_bus_get_handle(&handle);
+    bsp_i2c_primary_bus_get_semaphore(&semaphore);
+    bmi2_set_i2c_configuration(handle, 0x68, semaphore);
+
+    int8_t                rslt;
+    struct bmi2_dev       bmi;
+    struct bmi2_sens_data sensor_data;
+    uint8_t               sensor_list[] = {BMI2_GYRO, BMI2_ACCEL};
+
+    memset(&bmi, 0, sizeof(struct bmi2_dev));
+    memset(&sensor_data, 0, sizeof(struct bmi2_sens_data));
+
+    printf("Interface init...\r\n");
+    rslt = bmi2_interface_init(&bmi, BMI2_I2C_INTF);
+    bmi2_error_codes_print_result(rslt);
+    if (rslt != BMI2_OK) {
+        printf("Failed to initialize interface\r\n");
+        // return NULL;
+    }
+
+    printf("Init...\r\n");
+    rslt = bmi270_init(&bmi);
+    bmi2_error_codes_print_result(rslt);
+    if (rslt != BMI2_OK) {
+        printf("Failed to initialize chip\r\n");
+        // return NULL;
+    }
+
+    printf("Config gyro...\r\n");
+    rslt = set_gyro_config(&bmi);
+    bmi2_error_codes_print_result(rslt);
+    if (rslt != BMI2_OK) {
+        printf("Failed to set gyro config\r\n");
+        // return NULL;
+    }
+
+    printf("Config accel...\r\n");
+    rslt = set_accel_config(&bmi);
+    bmi2_error_codes_print_result(rslt);
+    if (rslt != BMI2_OK) {
+        printf("Failed to set accel config\r\n");
+        // return NULL;
+    }
+
+    printf("Enable sensors...\r\n");
+    rslt = bmi2_sensor_enable(sensor_list, sizeof(sensor_list), &bmi);
+    bmi2_error_codes_print_result(rslt);
+    if (rslt != BMI2_OK) {
+        printf("Failed to enable\r\n");
+        // return NULL;
+    }
+
+    printf("Ready to get data\n");
+
+    return bmi;
+}
+
+struct imu_data get_imu_data(struct bmi2_dev bmi) {
+    struct bmi2_sens_data sensor_data;
+    int8_t                rslt;
+    struct imu_data       data;
+
+    rslt = bmi2_get_sensor_data(&sensor_data, &bmi);
+    printf("Got data or an error %d\n",rslt);
+    bmi2_error_codes_print_result(rslt);
+
+    if ((rslt == BMI2_OK) && (sensor_data.status & BMI2_DRDY_GYR) && (sensor_data.status & BMI2_DRDY_ACC)) {
+        /* Converting lsb to degree per second for 16 bit gyro at 2000dps range. */
+        float gyro_x = lsb_to_dps(sensor_data.gyr.x, (float)2000, bmi.resolution);
+        float gyro_y = lsb_to_dps(sensor_data.gyr.y, (float)2000, bmi.resolution);
+        float gyro_z = lsb_to_dps(sensor_data.gyr.z, (float)2000, bmi.resolution);
+
+        /* Converting lsb to meter per second squared for 16 bit accelerometer at 2G range. */
+        float accel_x = lsb_to_mps2(sensor_data.acc.x, (float)2, bmi.resolution);
+        float accel_y = lsb_to_mps2(sensor_data.acc.y, (float)2, bmi.resolution);
+        float accel_z = lsb_to_mps2(sensor_data.acc.z, (float)2, bmi.resolution);
+
+        // printf("A: %4.2f, %4.2f, %4.2f  G: %4.2f, %4.2f, %4.2f\n", accel_x, accel_y, accel_z, gyro_x, gyro_y,
+        //         gyro_z);
+
+        data.accel_x = accel_x;
+        data.accel_y = accel_y;
+        data.accel_z = accel_z;
+        data.gyro_x = gyro_x;
+        data.gyro_y = gyro_y;
+        data.gyro_z = gyro_z;
+    }
+
+    return data;
+}
+
 void test_bmi270(void *params) {
     i2c_master_bus_handle_t handle;
     SemaphoreHandle_t       semaphore;
@@ -189,6 +295,9 @@ void test_bmi270(void *params) {
             float gyro_x = lsb_to_dps(sensor_data.gyr.x, (float)2000, bmi.resolution);
             float gyro_y = lsb_to_dps(sensor_data.gyr.y, (float)2000, bmi.resolution);
             float gyro_z = lsb_to_dps(sensor_data.gyr.z, (float)2000, bmi.resolution);
+
+            g_gyro_x = gyro_x;
+            g_gyro_y = gyro_y;
 
             /* Converting lsb to meter per second squared for 16 bit accelerometer at 2G range. */
             float accel_x = lsb_to_mps2(sensor_data.acc.x, (float)2, bmi.resolution);
@@ -275,6 +384,18 @@ void playback_sine_wave_task(void *arg) {
     // vTaskDelete(NULL); //Delete the task to clean up after ourself
 }
 
+/*
+TODO game
+Spil hvor man skal undgå nogle sorte huller og "spise" nogle point
+Score står i hjørnet og bliver løbende opdateret
+
+Lav positioner for huller (maks X huller). Hvis cirklens midtpunkt er inde i en af de sorte huller, så er spillet slut
+Lav position for en mad. Når den er spist så lav en ny
+
+Have et array med position på sorte huller.
+Have noget mad
+*/
+
 void app_main(void) {
     // Start the GPIO interrupt service
     gpio_install_isr_service(0);
@@ -307,7 +428,9 @@ void app_main(void) {
     
     xTaskCreate(playback_sine_wave_task, "sine_playback", 4096, NULL, 5, NULL);
 
-    xTaskCreate(test_bmi270, "Testing BMI270 IMU", 4096, NULL, 2, NULL);
+    struct bmi2_dev bmi = init_bmi();
+
+    // xTaskCreate(test_bmi270, "Testing BMI270 IMU", 4096, NULL, 2, NULL);
 
     // Get display parameters and rotation
     res = bsp_display_get_parameters(&display_h_res, &display_v_res, &display_color_format, &display_data_endian);
@@ -380,15 +503,52 @@ void app_main(void) {
 
     float midpoint_x = pax_buf_get_width(&fb) / 2.0;  // Middle of the screen horizontally.
     float midpoint_y = pax_buf_get_height(&fb) / 2.0; // Middle of the screen vertically.
-    float radius     = 50;                             // Nice, big circle.
+    float radius     = 25;                             // Nice, big circle.
     pax_simple_circle(&fb, pax_col_rgb(255, 0, 0), midpoint_x, midpoint_y, radius);
 
     blit();
 
+    struct imu_data data;
+
     while (1) {
         //clear_screen();
         bsp_input_event_t event;
-        if (xQueueReceive(input_event_queue, &event, portMAX_DELAY) == pdTRUE) {
+        pax_simple_circle(&fb, WHITE, midpoint_x, midpoint_y, radius);
+        if (midpoint_x+radius > pax_buf_get_width(&fb)) {
+            midpoint_x = pax_buf_get_width(&fb)-radius;
+        }
+
+        if (midpoint_x-radius < 0) {
+            midpoint_x = 0+radius;
+        }
+
+        if (midpoint_y+radius > pax_buf_get_height(&fb)) {
+            midpoint_y = pax_buf_get_height(&fb)-radius;
+        }
+
+        if (midpoint_y-radius < 0) {
+            midpoint_y = 0+radius;
+        }
+
+        data = get_imu_data(bmi);
+
+        if (data.accel_y>1) {
+            midpoint_x+=10;
+        }
+        if (data.accel_y<-1) {
+            midpoint_x-=10;
+        }
+        if (data.accel_x>1) {
+            midpoint_y-=10;
+        }
+        if (data.accel_x<-1) {
+            midpoint_y+=10;
+        }
+        pax_simple_circle(&fb, pax_col_rgb(255, 0, 0), midpoint_x, midpoint_y, radius);
+        blit();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        /**/
+        if (xQueueReceive(input_event_queue, &event, 0/*portMAX_DELAY*/) == pdTRUE) {
             switch (event.type) {
                 case INPUT_EVENT_TYPE_KEYBOARD: {
                     if (event.args_keyboard.ascii != '\b' ||
@@ -489,5 +649,6 @@ void app_main(void) {
                     break;
             }
         }
+        /**/
     }
 }
